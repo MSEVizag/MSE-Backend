@@ -1,9 +1,10 @@
 -- Enable UUID generation extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create Custom ENUM for Stock Status
+-- Create Custom ENUM for Stock Status and Visibility
 DO $$ BEGIN
     CREATE TYPE stock_status_enum AS ENUM ('in_stock', 'sold_out', 'pre_order');
+    CREATE TYPE visibility_status_enum AS ENUM ('published', 'hidden', 'draft');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS products (
     -- Public Information
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(255) UNIQUE NOT NULL,
+    category VARCHAR(100) NOT NULL,
     description TEXT,
     price NUMERIC(10, 2) NOT NULL DEFAULT 0.00 CHECK (price >= 0),
     
@@ -30,9 +32,10 @@ CREATE TABLE IF NOT EXISTS products (
     tags TEXT[] DEFAULT '{}',
 
     -- Visibility & Stock Controls
-    is_visible BOOLEAN DEFAULT TRUE NOT NULL,
+    visibility_status visibility_status_enum DEFAULT 'published' NOT NULL,
     stock_status stock_status_enum DEFAULT 'in_stock' NOT NULL,
     stock_quantity INTEGER DEFAULT 0 CHECK (stock_quantity >= 0) NOT NULL,
+    moq INTEGER DEFAULT 1 CHECK (moq >= 1) NOT NULL,
 
     -- Internal / Admin Metadata (NEVER expose to storefront APIs)
     sku VARCHAR(100) UNIQUE,

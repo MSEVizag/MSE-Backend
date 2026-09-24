@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { db } from '@/lib/db';
+import { products } from '@/db/schema';
+import { eq, desc } from 'drizzle-orm';
+import crypto from 'crypto';
 
 const s3Client = new S3Client({
   region: 'auto',
@@ -12,80 +14,115 @@ const s3Client = new S3Client({
   },
 });
 
+export async function GET() {
+  try {
+    const allProducts = await db.select().from(products).orderBy(desc(products.createdAt));
+    
+    // Map database models to the JSON structure expected by the frontend
+    const mappedProducts = allProducts.map(p => {
+      const specsJson: any = p.specs || {};
+      return {
+        id: p.id,
+        title: p.name,
+        slug: p.slug,
+        category: p.category,
+        description: p.description,
+        image: specsJson.image || '',
+        thumbnails: specsJson.thumbnails || [],
+        videoUrl: specsJson.videoUrl || '',
+        badges: specsJson.badges || [],
+        pricingTiers: specsJson.pricingTiers || [],
+        hideExactPrices: specsJson.hideExactPrices || false,
+        testimonials: specsJson.testimonials || [],
+        documents: specsJson.documents || [],
+        contactConfig: specsJson.contactConfig || {},
+        features: specsJson.features || [],
+        specs: specsJson.extendedSpecs || [],
+        tag: p.tags?.[0] || '',
+        moq: p.moq,
+        visibilityStatus: p.visibilityStatus,
+        stockStatus: p.stockStatus,
+      };
+    });
+
+    return NextResponse.json({ success: true, catalog: mappedProducts });
+  } catch (error) {
+    console.error('Error fetching catalog:', error);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const newProduct = await request.json();
     
-    // Validate required fields
     if (!newProduct.title || !newProduct.category || !newProduct.image || !newProduct.description) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
-    const dataFilePath = path.join(process.cwd(), 'public', 'data', 'catalog.json');
-    
-    // Read existing catalog
-    let currentCatalog = [];
-    if (fs.existsSync(dataFilePath)) {
-      const fileData = fs.readFileSync(dataFilePath, 'utf-8');
-      try {
-        currentCatalog = JSON.parse(fileData);
-      } catch (e) {
-        currentCatalog = [];
-      }
-    }
+    const productId = newProduct.id || crypto.randomUUID();
+    const slug = newProduct.title.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + productId.substring(0, 8);
+    let imageUrl = newProduct.image;
 
-    // Generate a unique ID
-    const maxId = currentCatalog.reduce((max: number, p: any) => {
-      const idNum = parseInt(p.id, 10);
-      return !isNaN(idNum) && idNum > max ? idNum : max;
-    }, 0);
-    newProduct.id = (maxId + 1).toString();
+    const specsJson = {
+      image: imageUrl,
+      thumbnails: newProduct.thumbnails || [],
+      videoUrl: newProduct.videoUrl || '',
+      badges: newProduct.badges || [],
+      pricingTiers: newProduct.pricingTiers || [],
+      hideExactPrices: newProduct.hideExactPrices || false,
+      testimonials: newProduct.testimonials || [],
+      documents: newProduct.documents || [],
+      contactConfig: newProduct.contactConfig || {},
+      features: newProduct.features || [],
+      extendedSpecs: newProduct.extendedSpecs || newProduct.specs || [] 
+    };
 
-    // R2 Upload Logic
-    if (newProduct.image && newProduct.image.startsWith('data:image/') && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY) {
-      // 1. Decode base64 image
-      const mimeType = newProduct.image.substring(
-        newProduct.image.indexOf(':') + 1,
-        newProduct.image.indexOf(';')
-      );
-      const extension = mimeType.split('/')[1] || 'jpg';
-      const base64Data = newProduct.image.replace(/^data:image\/\w+;base64,/, '');
-      const imageBuffer = Buffer.from(base64Data, 'base64');
+    if (process.env.R2_ACCESS_KEY_ID) {
+      const infoKey = `products/${productId}/info.json`;
+      const productDetails = {
+        ...newProduct,
+        id: productId,
+        image: imageUrl
+      };
       
-      const imageKey = `${newProduct.id}/image.${extension}`;
-      const specKey = `${newProduct.id}/spec.json`;
-
-      // 2. Upload Image to R2
       await s3Client.send(new PutObjectCommand({
         Bucket: 'msevizag',
-        Key: imageKey,
-        Body: imageBuffer,
-        ContentType: mimeType,
-      }));
-
-      // 3. Upload spec.json to R2
-      await s3Client.send(new PutObjectCommand({
-        Bucket: 'msevizag',
-        Key: specKey,
-        Body: JSON.stringify(newProduct.specs || [], null, 2),
+        Key: infoKey,
+        Body: JSON.stringify(productDetails, null, 2),
         ContentType: 'application/json',
       }));
-
-      // 4. Set public CDN URL
-      newProduct.image = `https://msecdn.switchspace.in/${imageKey}`;
     }
 
-    // Append the new product
-    currentCatalog.push(newProduct);
-
-    // Write it back to the file
-    const dataDirPath = path.dirname(dataFilePath);
-    if (!fs.existsSync(dataDirPath)) {
-      fs.mkdirSync(dataDirPath, { recursive: true });
+    let stockStatus: "in_stock" | "sold_out" | "pre_order" = "in_stock";
+    if (newProduct.stockStatus && typeof newProduct.stockStatus === 'string') {
+        const s = newProduct.stockStatus.toLowerCase();
+        if (s.includes('order')) stockStatus = 'pre_order';
+        if (s.includes('out')) stockStatus = 'sold_out';
     }
-    fs.writeFileSync(dataFilePath, JSON.stringify(currentCatalog, null, 2));
 
-    return NextResponse.json({ success: true, product: newProduct });
+    const [insertedProduct] = await db.insert(products).values({
+      id: productId,
+      name: newProduct.title,
+      slug: slug,
+      category: newProduct.category,
+      description: newProduct.description,
+      price: newProduct.pricingTiers?.[0]?.price?.toString() || '0.00',
+      specs: specsJson,
+      tags: newProduct.tag ? [newProduct.tag] : [],
+      moq: newProduct.moq || 1,
+      visibilityStatus: newProduct.visibilityStatus || 'published',
+      stockStatus: stockStatus,
+      stockQuantity: 100
+    }).returning();
+
+    const responseProduct = {
+      ...newProduct,
+      id: insertedProduct.id,
+      image: imageUrl,
+    };
+
+    return NextResponse.json({ success: true, product: responseProduct });
   } catch (error) {
     console.error('Error adding product:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
@@ -100,24 +137,11 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: 'Missing product ID' }, { status: 400 });
     }
 
-    const dataFilePath = path.join(process.cwd(), 'public', 'data', 'catalog.json');
+    const deleted = await db.delete(products).where(eq(products.id, id)).returning();
     
-    if (!fs.existsSync(dataFilePath)) {
-      return NextResponse.json({ error: 'Catalog not found' }, { status: 404 });
-    }
-
-    const fileData = fs.readFileSync(dataFilePath, 'utf-8');
-    let currentCatalog = JSON.parse(fileData);
-
-    const initialLength = currentCatalog.length;
-    currentCatalog = currentCatalog.filter((p: any) => p.id !== id);
-
-    if (currentCatalog.length === initialLength) {
+    if (deleted.length === 0) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
-
-    // Write updated catalog back to the file
-    fs.writeFileSync(dataFilePath, JSON.stringify(currentCatalog, null, 2));
 
     return NextResponse.json({ success: true, message: 'Product deleted successfully' });
   } catch (error) {

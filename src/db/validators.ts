@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const productInsertSchema = z.object({
   name: z.string().min(1, "Name is required").max(255),
   slug: z.string().min(1, "Slug is required").max(255),
+  category: z.string().min(1, "Category is required").max(100),
   description: z.string().optional().nullable(),
   price: z.union([z.string(), z.number()])
     .transform(v => Number(v))
@@ -11,9 +12,10 @@ export const productInsertSchema = z.object({
   specs: z.record(z.any()).default({}),
   tags: z.array(z.string()).default([]),
   
-  isVisible: z.boolean().default(true),
+  visibilityStatus: z.enum(['published', 'hidden', 'draft']).default('published'),
   stockStatus: z.enum(['in_stock', 'sold_out', 'pre_order']).default('in_stock'),
   stockQuantity: z.number().int().min(0, "Stock quantity cannot be negative").default(0),
+  moq: z.number().int().min(1, "MOQ must be at least 1").default(1),
   
   sku: z.string().max(100).optional().nullable(),
   internalNotes: z.string().optional().nullable(),

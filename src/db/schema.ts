@@ -15,6 +15,7 @@ import {
 import { sql } from "drizzle-orm";
 
 export const stockStatusEnum = pgEnum('stock_status_enum', ['in_stock', 'sold_out', 'pre_order']);
+export const visibilityStatusEnum = pgEnum('visibility_status_enum', ['published', 'hidden', 'draft']);
 
 // Custom type for tsvector 
 const tsvector = customType<{ data: string }>({
@@ -28,6 +29,7 @@ export const products = pgTable('products', {
   
   name: varchar('name', { length: 255 }).notNull(),
   slug: varchar('slug', { length: 255 }).notNull().unique(),
+  category: varchar('category', { length: 100 }).notNull(),
   description: text('description'),
   price: numeric('price', { precision: 10, scale: 2 }).notNull().default('0.00'),
   
@@ -38,9 +40,10 @@ export const products = pgTable('products', {
   specs: jsonb('specs').notNull().default(sql`'{}'::jsonb`),
   tags: text('tags').array().default(sql`'{}'`),
   
-  isVisible: boolean('is_visible').notNull().default(true),
+  visibilityStatus: visibilityStatusEnum('visibility_status').notNull().default('published'),
   stockStatus: stockStatusEnum('stock_status').notNull().default('in_stock'),
   stockQuantity: integer('stock_quantity').notNull().default(0),
+  moq: integer('moq').notNull().default(1),
   
   sku: varchar('sku', { length: 100 }).unique(),
   internalNotes: text('internal_notes'),
@@ -57,7 +60,7 @@ export const products = pgTable('products', {
   index('idx_products_specs').using('gin', table.specs),
   index('idx_products_tags').using('gin', table.tags),
   index('idx_products_fts').using('gin', table.fts),
-  index('idx_products_visibility').on(table.isVisible),
+  index('idx_products_visibility').on(table.visibilityStatus),
   index('idx_products_stock_status').on(table.stockStatus),
   index('idx_products_created_at').on(table.createdAt.desc()),
 ]);
