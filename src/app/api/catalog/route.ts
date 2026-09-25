@@ -1,49 +1,75 @@
 import { NextResponse } from 'next/server';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { db } from '@/lib/db';
 import { products } from '@/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import crypto from 'crypto';
 
-const s3Client = new S3Client({
-  region: 'auto',
-  endpoint: 'https://6f97938ae67d40dcb6b8b3b8e0e5e7e8.r2.cloudflarestorage.com',
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-  },
-});
+// S3 client will be instantiated inside the handlers
 
 export async function GET() {
   try {
     const allProducts = await db.select().from(products).orderBy(desc(products.createdAt));
     
+    const s3Client = new S3Client({
+      region: 'auto',
+      endpoint: 'https://8e19481a16647679f6ab9703ef5e5189.r2.cloudflarestorage.com',
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+      },
+    });
+
+    const generatePresignedUrl = async (url: string) => {
+      if (!url || !url.startsWith('https://msecdn.switchspace.in/')) return url;
+      try {
+        const key = url.replace('https://msecdn.switchspace.in/', '');
+        const command = new GetObjectCommand({ Bucket: 'msevizag', Key: key });
+        return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+      } catch (err) {
+        console.error('Failed to sign URL', err);
+        return url;
+      }
+    };
+
     // Map database models to the JSON structure expected by the frontend
-    const mappedProducts = allProducts.map(p => {
+    const mappedProducts = await Promise.all(allProducts.map(async p => {
       const specsJson: any = p.specs || {};
+      
+      const image = await generatePresignedUrl(specsJson.image || '');
+      const thumbnails = await Promise.all((specsJson.thumbnails || []).map(generatePresignedUrl));
+      
+      const documents = await Promise.all((specsJson.documents || []).map(async (doc: any) => ({
+        ...doc,
+        url: await generatePresignedUrl(doc.url)
+      })));
+      
       return {
         id: p.id,
         title: p.name,
         slug: p.slug,
         category: p.category,
+        brand: specsJson.brand || '',
         description: p.description,
-        image: specsJson.image || '',
-        thumbnails: specsJson.thumbnails || [],
+        image,
+        thumbnails,
         videoUrl: specsJson.videoUrl || '',
         badges: specsJson.badges || [],
         pricingTiers: specsJson.pricingTiers || [],
         hideExactPrices: specsJson.hideExactPrices || false,
         testimonials: specsJson.testimonials || [],
-        documents: specsJson.documents || [],
+        documents,
         contactConfig: specsJson.contactConfig || {},
         features: specsJson.features || [],
         specs: specsJson.extendedSpecs || [],
+        extendedSpecs: specsJson.extendedSpecs || [],
         tag: p.tags?.[0] || '',
         moq: p.moq,
         visibilityStatus: p.visibilityStatus,
         stockStatus: p.stockStatus,
       };
-    });
+    }));
 
     return NextResponse.json({ success: true, catalog: mappedProducts });
   } catch (error) {
@@ -75,6 +101,7 @@ export async function POST(request: Request) {
       documents: newProduct.documents || [],
       contactConfig: newProduct.contactConfig || {},
       features: newProduct.features || [],
+      brand: newProduct.brand || '',
       extendedSpecs: newProduct.extendedSpecs || newProduct.specs || [] 
     };
 
@@ -85,6 +112,14 @@ export async function POST(request: Request) {
         id: productId,
         image: imageUrl
       };
+      const s3Client = new S3Client({
+        region: 'auto',
+        endpoint: 'https://8e19481a16647679f6ab9703ef5e5189.r2.cloudflarestorage.com',
+        credentials: {
+          accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+        },
+      });
       
       await s3Client.send(new PutObjectCommand({
         Bucket: 'msevizag',
@@ -116,6 +151,8 @@ export async function POST(request: Request) {
       stockQuantity: 100
     }).returning();
 
+    await syncCatalogToR2();
+
     const responseProduct = {
       ...newProduct,
       id: insertedProduct.id,
@@ -143,9 +180,65 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ error: 'Product not found' }, { status: 404 });
     }
 
+    await syncCatalogToR2();
+
     return NextResponse.json({ success: true, message: 'Product deleted successfully' });
   } catch (error) {
     console.error('Error deleting product:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  }
+}
+
+async function syncCatalogToR2() {
+  if (!process.env.R2_ACCESS_KEY_ID) return;
+  
+  try {
+    const allProducts = await db.select().from(products).orderBy(desc(products.createdAt));
+    const mappedProducts = allProducts.map(p => {
+      const specsJson: any = p.specs || {};
+      return {
+        id: p.id,
+        title: p.name,
+        slug: p.slug,
+        category: p.category,
+        brand: specsJson.brand || '',
+        description: p.description,
+        image: specsJson.image || '',
+        thumbnails: specsJson.thumbnails || [],
+        videoUrl: specsJson.videoUrl || '',
+        badges: specsJson.badges || [],
+        pricingTiers: specsJson.pricingTiers || [],
+        hideExactPrices: specsJson.hideExactPrices || false,
+        testimonials: specsJson.testimonials || [],
+        documents: specsJson.documents || [],
+        contactConfig: specsJson.contactConfig || {},
+        features: specsJson.features || [],
+        specs: specsJson.extendedSpecs || [],
+        extendedSpecs: specsJson.extendedSpecs || [],
+        tag: p.tags?.[0] || '',
+        moq: p.moq,
+        visibilityStatus: p.visibilityStatus,
+        stockStatus: p.stockStatus,
+      };
+    });
+
+    const s3Client = new S3Client({
+      region: 'auto',
+      endpoint: 'https://8e19481a16647679f6ab9703ef5e5189.r2.cloudflarestorage.com',
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+      },
+    });
+
+    await s3Client.send(new PutObjectCommand({
+      Bucket: 'msevizag',
+      Key: 'catalog.json',
+      Body: JSON.stringify({ catalog: mappedProducts }, null, 2),
+      ContentType: 'application/json',
+    }));
+    console.log('Successfully synced catalog.json to R2');
+  } catch (err) {
+    console.error('Error syncing catalog.json to R2:', err);
   }
 }

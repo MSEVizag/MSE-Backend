@@ -2,14 +2,7 @@ import { NextResponse } from 'next/server';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-const s3Client = new S3Client({
-  region: 'auto',
-  endpoint: 'https://6f97938ae67d40dcb6b8b3b8e0e5e7e8.r2.cloudflarestorage.com',
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-  },
-});
+// S3 client will be instantiated inside the handlers
 
 export async function POST(request: Request) {
   try {
@@ -20,6 +13,15 @@ export async function POST(request: Request) {
     }
 
     const key = `products/${productId}/${filename}`;
+
+    const s3Client = new S3Client({
+      region: 'auto',
+      endpoint: 'https://8e19481a16647679f6ab9703ef5e5189.r2.cloudflarestorage.com',
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+      },
+    });
 
     const command = new PutObjectCommand({
       Bucket: 'msevizag',
